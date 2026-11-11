@@ -1,15 +1,15 @@
 import os
-import sqlite3
 import threading
 from datetime import datetime, timedelta
 from flask import Flask
+import psycopg2
 import telebot
 from telebot import types
 
 TOKEN = os.getenv("BOT_TOKEN")
+DB_URL = os.getenv("DATABASE_URL")
 CUR = "₼"
 LIMIT = 5000
-DB = "oscorp.db"
 
 CATS = {
     "Зарплаты сотрудников": "💵",
@@ -26,13 +26,13 @@ bot = telebot.TeleBot(TOKEN)
 state = {}
 
 def db():
-    conn = sqlite3.connect(DB)
+    conn = psycopg2.connect(DB_URL, sslmode="require")
     c = conn.cursor()
-    c.execute('CREATE TABLE IF NOT EXISTS exp (id INTEGER PRIMARY KEY, dt TEXT, cat TEXT, amt REAL, comm TEXT)')
-    c.execute('CREATE TABLE IF NOT EXISTS emp (id INTEGER PRIMARY KEY, name TEXT UNIQUE, debt REAL DEFAULT 0)')
-    c.execute('CREATE TABLE IF NOT EXISTS firm (id INTEGER PRIMARY KEY, name TEXT UNIQUE, debt REAL DEFAULT 0)')
-    c.execute('CREATE TABLE IF NOT EXISTS cstaff (id INTEGER PRIMARY KEY, name TEXT UNIQUE)')
-    c.execute('CREATE TABLE IF NOT EXISTS misc (id INTEGER PRIMARY KEY, name TEXT UNIQUE)')
+    c.execute('CREATE TABLE IF NOT EXISTS exp (id SERIAL PRIMARY KEY, dt TEXT, cat TEXT, amt REAL, comm TEXT)')
+    c.execute('CREATE TABLE IF NOT EXISTS emp (id SERIAL PRIMARY KEY, name TEXT UNIQUE, debt REAL DEFAULT 0)')
+    c.execute('CREATE TABLE IF NOT EXISTS firm (id SERIAL PRIMARY KEY, name TEXT UNIQUE, debt REAL DEFAULT 0)')
+    c.execute('CREATE TABLE IF NOT EXISTS cstaff (id SERIAL PRIMARY KEY, name TEXT UNIQUE)')
+    c.execute('CREATE TABLE IF NOT EXISTS misc (id SERIAL PRIMARY KEY, name TEXT UNIQUE)')
     conn.commit()
     return conn
 
@@ -45,7 +45,7 @@ def menu():
 @bot.message_handler(commands=['start'])
 def start(m):
     db().close()
-    bot.send_message(m.chat.id, "🏥 *Oscorp — Финансовый учет*\nВыберите действие:", parse_mode="Markdown", reply_markup=menu())
+    bot.send_message(m.chat.id, "🏥 *Oscorp — Финансовый учет (Cloud DB)*\nВыберите действие:", parse_mode="Markdown", reply_markup=menu())
 
 @bot.message_handler(func=lambda m: m.text == "➕ Добавить расход / Операцию")
 def choose_cat(m):
@@ -75,7 +75,9 @@ def cat_sel(c):
 
 def show_debt_list(cid, mid, tbl, title):
     conn = db()
-    rows = conn.execute(f"SELECT name, debt FROM {tbl} ORDER BY name").fetchall()
+    c = conn.cursor()
+    c.execute(f"SELECT name, debt FROM {tbl} ORDER BY name")
+    rows = c.fetchall()
     conn.close()
     mk = types.InlineKeyboardMarkup(row_width=1)
     for n, d in rows:
@@ -86,7 +88,9 @@ def show_debt_list(cid, mid, tbl, title):
 
 def show_simple(cid, mid, tbl, title):
     conn = db()
-    rows = conn.execute(f"SELECT name FROM {tbl} ORDER BY name").fetchall()
+    c = conn.cursor()
+    c.execute(f"SELECT name FROM {tbl} ORDER BY name")
+    rows = c.fetchall()
     conn.close()
     mk = types.InlineKeyboardMarkup(row_width=1)
     for (item_name,) in rows:
@@ -106,11 +110,12 @@ def save_add(m, tbl):
     if not name or name.startswith(("➕", "📊", "💳")):
         return bot.send_message(m.chat.id, "⚠️ Отменено.", reply_markup=menu())
     conn = db()
+    c = conn.cursor()
     try:
-        conn.execute(f"INSERT INTO {tbl} (name) VALUES (?)", (name,))
+        c.execute(f"INSERT INTO {tbl} (name) VALUES (%s) ON CONFLICT (name) DO NOTHING", (name,))
         conn.commit()
     except Exception:
-        pass
+        conn.rollback()
     conn.close()
     bot.send_message(m.chat.id, f"✅ *{name}* добавлено!", parse_mode="Markdown", reply_markup=menu())
 
@@ -120,7 +125,9 @@ def item_sel(c):
     cid, mid = c.message.chat.id, c.message.message_id
     if tbl in ("emp", "firm"):
         conn = db()
-        res = conn.execute(f"SELECT debt FROM {tbl} WHERE name=?", (name,)).fetchone()
+        cur = conn.cursor()
+        cur.execute(f"SELECT debt FROM {tbl} WHERE name=%s", (name,))
+        res = cur.fetchone()
         (debt,) = res if res else (0.0,)
         conn.close()
         mk = types.InlineKeyboardMarkup(row_width=1)
@@ -175,24 +182,24 @@ def finish_op(m):
     c = conn.cursor()
     t = st.get('target', '')
     if act == 'exp':
-        c.execute("INSERT INTO exp (dt, cat, amt, comm) VALUES (?,?,?,?)", (dt, st['cat'], amt, comm))
+        c.execute("INSERT INTO exp (dt, cat, amt, comm) VALUES (%s,%s,%s,%s)", (dt, st['cat'], amt, comm))
         res = f"✅ Расход записан: *{st['cat']}* — `{amt:,.2f} {CUR}`"
     elif act == 'empsal':
-        c.execute("INSERT INTO exp (dt, cat, amt, comm) VALUES (?,?,?,?)", (dt, f"💵 Зарплата ({t})", amt, comm))
+        c.execute("INSERT INTO exp (dt, cat, amt, comm) VALUES (%s,%s,%s,%s)", (dt, f"💵 Зарплата ({t})", amt, comm))
         res = f"✅ Выдана зарплата (*{t}*): `{amt:,.2f} {CUR}`"
     elif act == 'empadd':
-        c.execute("UPDATE emp SET debt = debt + ? WHERE name=?", (amt, t))
-        c.execute("INSERT INTO exp (dt, cat, amt, comm) VALUES (?,?,?,?)", (dt, f"💳 Выдано в долг ({t})", amt, comm))
+        c.execute("UPDATE emp SET debt = debt + %s WHERE name=%s", (amt, t))
+        c.execute("INSERT INTO exp (dt, cat, amt, comm) VALUES (%s,%s,%s,%s)", (dt, f"💳 Выдано в долг ({t})", amt, comm))
         res = f"✅ Выдано в долг (*{t}*): `{amt:,.2f} {CUR}`"
     elif act == 'emppay':
-        c.execute("UPDATE emp SET debt = MAX(0, debt - ?) WHERE name=?", (amt, t))
+        c.execute("UPDATE emp SET debt = GREATEST(0, debt - %s) WHERE name=%s", (amt, t))
         res = f"✅ Долг сотрудника (*{t}*) уменьшен на `{amt:,.2f} {CUR}`"
     elif act == 'firmpay':
-        c.execute("UPDATE firm SET debt = MAX(0, debt - ?) WHERE name=?", (amt, t))
-        c.execute("INSERT INTO exp (dt, cat, amt, comm) VALUES (?,?,?,?)", (dt, f"🏢 Оплата фирме ({t})", amt, comm))
+        c.execute("UPDATE firm SET debt = GREATEST(0, debt - %s) WHERE name=%s", (amt, t))
+        c.execute("INSERT INTO exp (dt, cat, amt, comm) VALUES (%s,%s,%s,%s)", (dt, f"🏢 Оплата фирме ({t})", amt, comm))
         res = f"✅ Оплачено фирме (*{t}*): `{amt:,.2f} {CUR}`"
     elif act == 'firmadd':
-        c.execute("UPDATE firm SET debt = debt + ? WHERE name=?", (amt, t))
+        c.execute("UPDATE firm SET debt = debt + %s WHERE name=%s", (amt, t))
         res = f"✅ Записан долг фирме (*{t}*): `{amt:,.2f} {CUR}`"
     conn.commit()
     conn.close()
@@ -202,7 +209,9 @@ def finish_op(m):
 def weekly(m):
     w_ago = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d %H:%M")
     conn = db()
-    rows = conn.execute("SELECT cat, SUM(amt) FROM exp WHERE dt >= ? GROUP BY cat", (w_ago,)).fetchall()
+    c = conn.cursor()
+    c.execute("SELECT cat, SUM(amt) FROM exp WHERE dt >= %s GROUP BY cat", (w_ago,))
+    rows = c.fetchall()
     conn.close()
     if not rows:
         return bot.send_message(m.chat.id, "📊 За последние 7 дней расходов не было.")
@@ -214,8 +223,11 @@ def weekly(m):
 @bot.message_handler(func=lambda m: m.text == "💳 Баланс долгов")
 def debts(m):
     conn = db()
-    emps = conn.execute("SELECT name, debt FROM emp WHERE debt > 0").fetchall()
-    firms = conn.execute("SELECT name, debt FROM firm WHERE debt > 0").fetchall()
+    c = conn.cursor()
+    c.execute("SELECT name, debt FROM emp WHERE debt > 0")
+    emps = c.fetchall()
+    c.execute("SELECT name, debt FROM firm WHERE debt > 0")
+    firms = c.fetchall()
     conn.close()
     e_txt = "\n".join([f"• {n}: `{d:,.2f} {CUR}`" for n, d in emps]) if emps else "— Нет долгов"
     f_txt = "\n".join([f"• {n}: `{d:,.2f} {CUR}`" for n, d in firms]) if firms else "— Нет долгов"
