@@ -449,5 +449,14 @@ def run_web():
 if __name__ == '__main__':
     db().close()
     threading.Thread(target=run_web, daemon=True).start()
-    bot.remove_webhook()
-    bot.infinity_polling(skip_pending=True)
+    print("Проверяем токен и подключаемся к Telegram...", flush=True)
+    if not TOKEN:
+        print("ОШИБКА: Переменная BOT_TOKEN пустая!", flush=True)
+    else:
+        try:
+            me = bot.get_me()
+            print(f"УСПЕХ! Бот подключен: @{me.username}", flush=True)
+            bot.remove_webhook()
+            bot.infinity_polling(skip_pending=True)
+        except Exception as e:
+            print(f"ОШИБКА TELEGRAM: {e}", flush=True)
