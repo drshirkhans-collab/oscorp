@@ -1,4 +1,6 @@
-import os, sqlite3, threading
+import os
+import sqlite3
+import threading
 from datetime import datetime, timedelta
 from flask import Flask
 import telebot
@@ -10,10 +12,14 @@ LIMIT = 5000
 DB = "oscorp.db"
 
 CATS = {
-    "Зарплаты сотрудников": "💵", "Расходы на фирму": "🏢",
-    "Расходники (салфетки)": "💉", "Аренда": "🔑",
-    "Пломбы": "💎", "Стомат. материалы": "🩺",
-    "Мобильные расходы": "📱", "Прочие расходы": "⚙️"
+    "Зарплаты сотрудников": "💵",
+    "Расходы на фирму": "🏢",
+    "Расходники (салфетки)": "💉",
+    "Аренда": "🔑",
+    "Пломбы": "💎",
+    "Стомат. материалы": "🩺",
+    "Мобильные расходы": "📱",
+    "Прочие расходы": "⚙️"
 }
 
 bot = telebot.TeleBot(TOKEN)
@@ -50,7 +56,7 @@ def choose_cat(m):
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith('cat_'))
 def cat_sel(c):
-    cat = c.data[4:]
+    _, _, cat = c.data.partition('cat_')
     cid, mid = c.message.chat.id, c.message.message_id
     if cat == "Зарплаты сотрудников":
         show_debt_list(cid, mid, "emp", "💵 *Зарплаты и долги:*")
@@ -83,16 +89,15 @@ def show_simple(cid, mid, tbl, title):
     rows = conn.execute(f"SELECT name FROM {tbl} ORDER BY name").fetchall()
     conn.close()
     mk = types.InlineKeyboardMarkup(row_width=1)
-    for r in rows:
-        mk.add(types.InlineKeyboardButton(f"📌 {r}", callback_data=f"{tbl}_sel_{r}"))
+    for (item_name,) in rows:
+        mk.add(types.InlineKeyboardButton(f"📌 {item_name}", callback_data=f"{tbl}_sel_{item_name}"))
     mk.add(types.InlineKeyboardButton("➕ Добавить ячейку / имя", callback_data=f"{tbl}_add"))
     if tbl == "cstaff":
         mk.add(types.InlineKeyboardButton("🏥 Общие на клинику", callback_data="cstaff_sel_Общие"))
     bot.edit_message_text(title, cid, mid, parse_mode="Markdown", reply_markup=mk)
-
 @bot.callback_query_handler(func=lambda c: c.data.endswith('_add'))
 def ask_add(c):
-    tbl = c.data.split('_')
+    tbl, _, _ = c.data.partition('_')
     bot.edit_message_text("✍️ Введите название / имя:", c.message.chat.id, c.message.message_id)
     bot.register_next_step_handler(c.message, save_add, tbl)
 
@@ -111,22 +116,26 @@ def save_add(m, tbl):
 
 @bot.callback_query_handler(func=lambda c: '_sel_' in c.data)
 def item_sel(c):
-    tbl, name = c.data.split('_sel_', 1)
+    tbl, _, name = c.data.partition('_sel_')
     cid, mid = c.message.chat.id, c.message.message_id
     if tbl in ("emp", "firm"):
         conn = db()
         res = conn.execute(f"SELECT debt FROM {tbl} WHERE name=?", (name,)).fetchone()
-        debt = res if res else 0.0
+        (debt,) = res if res else (0.0,)
         conn.close()
         mk = types.InlineKeyboardMarkup(row_width=1)
         if tbl == "emp":
-            mk.add(types.InlineKeyboardButton("💵 Выдать Зарплату", callback_data=f"op_empsal_{name}"),
-                   types.InlineKeyboardButton("💳 Выдать в Долг", callback_data=f"op_empadd_{name}"),
-                   types.InlineKeyboardButton("📉 Вернул / Списать долг", callback_data=f"op_emppay_{name}"))
+            mk.add(
+                types.InlineKeyboardButton("💵 Выдать Зарплату", callback_data=f"op_empsal_{name}"),
+                types.InlineKeyboardButton("💳 Выдать в Долг", callback_data=f"op_empadd_{name}"),
+                types.InlineKeyboardButton("📉 Вернул / Списать долг", callback_data=f"op_emppay_{name}")
+            )
             txt = f"👤 *{name}*\nДолг клинике: `{debt:,.2f} {CUR}`"
         else:
-            mk.add(types.InlineKeyboardButton("💸 Оплатить фирме (уменьшить долг)", callback_data=f"op_firmpay_{name}"),
-                   types.InlineKeyboardButton("📦 Взяли в долг (увеличить долг)", callback_data=f"op_firmadd_{name}"))
+            mk.add(
+                types.InlineKeyboardButton("💸 Оплатить фирме (уменьшить долг)", callback_data=f"op_firmpay_{name}"),
+                types.InlineKeyboardButton("📦 Взяли в долг (увеличить долг)", callback_data=f"op_firmadd_{name}")
+            )
             txt = f"🏢 *{name}*\nНаш долг фирме: `{debt:,.2f} {CUR}`"
         bot.edit_message_text(txt, cid, mid, parse_mode="Markdown", reply_markup=mk)
     else:
@@ -197,7 +206,7 @@ def weekly(m):
     conn.close()
     if not rows:
         return bot.send_message(m.chat.id, "📊 За последние 7 дней расходов не было.")
-    tot = sum(r for r in rows)
+    tot = sum(s for _, s in rows)
     txt = "\n".join([f"• {cat}: `{s:,.2f} {CUR}`" for cat, s in rows])
     warn = "\n⚠️ *Превышен недельный лимит!*" if tot > LIMIT else ""
     bot.send_message(m.chat.id, f"📊 *Расходы за 7 дней:*\n\n{txt}\n\n💰 *Итого:* `{tot:,.2f} {CUR}` (Лимит: `{LIMIT} {CUR}`){warn}", parse_mode="Markdown")
@@ -210,16 +219,19 @@ def debts(m):
     conn.close()
     e_txt = "\n".join([f"• {n}: `{d:,.2f} {CUR}`" for n, d in emps]) if emps else "— Нет долгов"
     f_txt = "\n".join([f"• {n}: `{d:,.2f} {CUR}`" for n, d in firms]) if firms else "— Нет долгов"
+    bot.send_message(m.chat.id, f"💳 *Баланс долгов:*\n\n👤 *Сотрудники клинике:*\n{e_txt}\n\n🏢 *Мы фирмам:*\n{f_txt}", parse_mode="Markdown")
 
-bot.send_message(m.chat.id, f"💳 Баланс долгов:\n\n👤 Сотрудники клинике:\n{e_txt}\n\n🏢 Мы фирмам:\n{f_txt}", parse_mode="Markdown")
-app = Flask(name)
+app = Flask(__name__)
+
 @app.route('/')
 def home():
-return "Oscorp Bot is running!"
+    return "Oscorp Bot is running!"
+
 def run_web():
-app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
-if name == 'main':
-db().close()
-threading.Thread(target=run_web, daemon=True).start()
-bot.remove_webhook()
-bot.infinity_polling(skip_pending=True)
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
+
+if __name__ == '__main__':
+    db().close()
+    threading.Thread(target=run_web, daemon=True).start()
+    bot.remove_webhook()
+    bot.infinity_polling(skip_pending=True)
