@@ -36,7 +36,6 @@ def db():
     c.execute('CREATE TABLE IF NOT EXISTS misc (id INTEGER PRIMARY KEY, name TEXT UNIQUE)')
     c.execute('CREATE TABLE IF NOT EXISTS cfg (k TEXT PRIMARY KEY, v TEXT)')
     c.execute("INSERT OR IGNORE INTO cfg (k, v) VALUES ('limit', '5000')")
-    # Миграция старых таблиц, если они уже были созданы
     try:
         c.execute("ALTER TABLE exp ADD COLUMN op_type TEXT DEFAULT 'exp'")
         c.execute("ALTER TABLE exp ADD COLUMN target TEXT DEFAULT ''")
@@ -49,8 +48,8 @@ def get_limit():
     conn = db()
     res = conn.execute("SELECT v FROM cfg WHERE k='limit'").fetchone()
     conn.close()
-    return float(res[0]) if res else 5000.0
-
+    (val,) = res if res else ('5000',)
+    return float(val)
 def menu():
     m = types.ReplyKeyboardMarkup(resize_keyboard=True)
     m.row("➕ Добавить операцию")
@@ -191,7 +190,6 @@ def item_sel(c):
         bot.edit_message_text(f"Выбрано: *{cat}*", cid, mid, parse_mode="Markdown")
         msg = bot.send_message(cid, f"💰 Введите сумму ({CUR}):", reply_markup=cancel_kb())
         bot.register_next_step_handler(msg, step_amt)
-
 @bot.callback_query_handler(func=lambda c: c.data.startswith('hist_'))
 def show_target_hist(c):
     _, _, name = c.data.partition('hist_')
@@ -229,6 +227,7 @@ def step_amt(m):
     except Exception:
         msg = bot.send_message(m.chat.id, "⚠️ Введите корректное число или нажмите «❌ Отмена»:", reply_markup=cancel_kb())
         bot.register_next_step_handler(msg, step_amt)
+
 def finish_op(m):
     if is_cancel(m):
         state.pop(m.from_user.id, None)
@@ -270,7 +269,6 @@ def finish_op(m):
     if comm:
         res += f"\n📝 _{comm}_"
     bot.send_message(m.chat.id, res, parse_mode="Markdown", reply_markup=menu())
-
 @bot.message_handler(func=lambda m: m.text == "↩️ Отменить последнюю")
 def undo_last(m):
     conn = db()
@@ -280,7 +278,6 @@ def undo_last(m):
         conn.close()
         return bot.send_message(m.chat.id, "⚠️ Нет операций для отмены.", reply_markup=menu())
     rid, cat, amt, op, t = row
-    # Умный откат долгов в базе
     if op == 'empadd':
         c.execute("UPDATE emp SET debt = MAX(0, debt - ?) WHERE name=?", (amt, t))
     elif op == 'emppay':
@@ -318,7 +315,8 @@ def send_report(c):
         lines = ["📅 *Операции за сегодня:*\n"]
         tot = 0.0
         for dt, cat, amt, comm, op in rows:
-            tm = dt.split(' ')[1] if ' ' in dt else dt
+            _, _, tm = dt.partition(' ')
+            tm = tm if tm else dt
             cm = f" ({comm})" if comm else ""
             lines.append(f"• `{tm}` {cat}: `{amt:,.2f} {CUR}`{cm}")
             if op not in ('emppay', 'firmadd'):
@@ -415,35 +413,41 @@ def del_menu(c):
         types.InlineKeyboardButton("💉 Удалить из расходников", callback_data="deltbl_cstaff"),
         types.InlineKeyboardButton("⚙️ Удалить ячейку из прочих", callback_data="deltbl_misc")
     )
-bot.edit_message_text("🗑 Откуда удалить запись?", c.message.chat.id, c.message.message_id, parse_mode="Markdown", reply_markup=mk)
+    bot.edit_message_text("🗑 *Откуда удалить запись?*", c.message.chat.id, c.message.message_id, parse_mode="Markdown", reply_markup=mk)
+
 @bot.callback_query_handler(func=lambda c: c.data.startswith('deltbl_'))
 def del_list(c):
-, , tbl = c.data.partition('deltbl')
-conn = db()
-rows = conn.execute(f"SELECT id, name FROM {tbl} ORDER BY name").fetchall()
-conn.close()
-if not rows:
-return bot.answer_callback_query(c.id, "Список пуст", show_alert=True)
-mk = types.InlineKeyboardMarkup(row_width=1)
-for rid, name in rows:
-mk.add(types.InlineKeyboardButton(f"❌ {name}", callback_data=f"rm{tbl}_{rid}"))
-bot.edit_message_text("Нажмите на имя для удаления из списка:", c.message.chat.id, c.message.message_id, reply_markup=mk)
+    _, _, tbl = c.data.partition('deltbl_')
+    conn = db()
+    rows = conn.execute(f"SELECT id, name FROM {tbl} ORDER BY name").fetchall()
+    conn.close()
+    if not rows:
+        return bot.answer_callback_query(c.id, "Список пуст", show_alert=True)
+    mk = types.InlineKeyboardMarkup(row_width=1)
+    for rid, name in rows:
+        mk.add(types.InlineKeyboardButton(f"❌ {name}", callback_data=f"rm_{tbl}_{rid}"))
+    bot.edit_message_text("Нажмите на имя для удаления из списка:", c.message.chat.id, c.message.message_id, reply_markup=mk)
+
 @bot.callback_query_handler(func=lambda c: c.data.startswith('rm_'))
 def remove_item(c):
-, tbl, rid = c.data.split('', 2)
-conn = db()
-conn.execute(f"DELETE FROM {tbl} WHERE id=?", (rid,))
-conn.commit()
-conn.close()
-bot.edit_message_text("✅ Запись удалена из списка.", c.message.chat.id, c.message.message_id)
-app = Flask(name)
+    _, tbl, rid = c.data.split('_', 2)
+    conn = db()
+    conn.execute(f"DELETE FROM {tbl} WHERE id=?", (rid,))
+    conn.commit()
+    conn.close()
+    bot.edit_message_text("✅ Запись удалена из списка.", c.message.chat.id, c.message.message_id)
+
+app = Flask(__name__)
+
 @app.route('/')
 def home():
-return "Oscorp Bot is running!"
+    return "Oscorp Bot is running!"
+
 def run_web():
-app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
-if name == 'main':
-db().close()
-threading.Thread(target=run_web, daemon=True).start()
-bot.remove_webhook()
-bot.infinity_polling(skip_pending=True)
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
+
+if __name__ == '__main__':
+    db().close()
+    threading.Thread(target=run_web, daemon=True).start()
+    bot.remove_webhook()
+    bot.infinity_polling(skip_pending=True)
